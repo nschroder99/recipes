@@ -286,8 +286,16 @@ function App() {
   const [deletedRecipe, setDeletedRecipe] = useState(null);
   const [undoTimeout, setUndoTimeout] = useState(null);
 
-  useEffect(() => { const stored = loadRecipes(); setRecipes(stored && stored.length > 0 ? stored : DEFAULT_RECIPES); setLoading(false); }, []);
-  useEffect(() => { if (!loading) saveRecipes(recipes); }, [recipes, loading]);
+  useEffect(() => {
+    const stored = loadRecipes();
+    if (stored && stored.length > 0) { setRecipes(stored); }
+    else { setRecipes(DEFAULT_RECIPES); saveRecipes(DEFAULT_RECIPES); }
+    // Use a timeout to ensure loading flag is set after initial render cycle
+    setTimeout(() => setLoading(false), 0);
+  }, []);
+  useEffect(() => {
+    if (!loading && recipes.length > 0) saveRecipes(recipes);
+  }, [recipes, loading]);
 
   const toggleSelect = (id) => setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
