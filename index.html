@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Grocery List</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #f5f3ed; font-family: 'EB Garamond', Georgia, 'Times New Roman', serif; -webkit-font-smoothing: antialiased; }
+    #root { min-height: 100vh; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script>
+"use strict";
+const { useState, useEffect, useCallback, createElement: h } = React;
+
+const STORAGE_KEY = "grocery-recipes-v3";
+
+const DEFAULT_RECIPES = [
+  {
+    id: "demo-1", name: "Spaghetti Carbonara",
+    url: "https://www.bonappetit.com/recipe/simple-carbonara", servings: 4,
+    ingredients: [
+      { name: "Spaghetti", amount: 1, unit: "lb" },
+      { name: "Guanciale", amount: 8, unit: "oz" },
+      { name: "Egg Yolks", amount: 6, unit: "" },
+      { name: "Pecorino Romano", amount: 1, unit: "cup" },
+      { name: "Black Pepper", amount: 2, unit: "tsp" },
+    ],
+  },
+  {
+    id: "demo-2", name: "Greek Salad", url: "", servings: 2,
+    ingredients: [
+      { name: "Cucumber", amount: 1, unit: "" },
+      { name: "Tomatoes", amount: 3, unit: "" },
+      { name: "Red Onion", amount: 0.5, unit: "" },
+      { name: "Feta Cheese", amount: 6, unit: "oz" },
+      { name: "Kalamata Olives", amount: 0.5, unit: "cup" },
+      { name: "Olive Oil", amount: 3, unit: "tbsp" },
+      { name: "Lemon", amount: 1, unit: "" },
+    ],
+  },
+];
+
+const UNITS = ["", "oz", "lb", "cup", "tbsp", "tsp", "g", "kg", "ml", "L", "can", "bunch", "clove", "head", "bag", "box", "jar"];
+const UNIT_SET = new Set(UNITS.map(u => u.toLowerCase()).filter(Boolean));
+const UNIT_ALIASES = {
+  cups:"cup",tbsps:"tbsp",tsps:"tsp",ounces:"oz",ounce:"oz",
+  pounds:"lb",pound:"lb",lbs:"lb",grams:"g",kilograms:"kg",
+  liters:"L",liter:"L",litres:"L",litre:"L",
+  cans:"can",bunches:"bunch",cloves:"clove",heads:"head",
+  bags:"bag",boxes:"box",jars:"jar",tablespoon:"tbsp",
+  tablespoons:"tbsp",teaspoon:"tsp",teaspoons:"tsp",
+};
+
+function parseIngredientLine(line) {
+  line = line.trim();
+  if (!line) return null;
+  line = line.replace(/^[-\u2022*]\s*/, "").replace(/^\d+\.\s+/, "").trim();
+  if (!line) return null;
+  const fractionMap = {"\u00BD":0.5,"\u2153":0.333,"\u00BC":0.25,"\u2154":0.667,"\u00BE":0.75,"\u215B":0.125,"\u215C":0.375,"\u215D":0.625,"\u215E":0.875};
+  let amount = 0, rest = line;
+  const ufp = /^(\d*)\s*([\u00BC\u00BD\u00BE\u2153\u2154\u215B\u215C\u215D\u215E])\s*/;
+  const np = /^(\d+\s+\d+\/\d+|\d+\/\d+|\d+\.?\d*)\s*/;
+  const um = rest.match(ufp), nm = rest.match(np);
+  if (um) {
+    const w = um[1] ? parseInt(um[1]) : 0;
+    amount = w + (fractionMap[um[2]] || 0);
+    rest = rest.slice(um[0].length);
+  } else if (nm) {
+    const raw = nm[1];
+    if (raw.includes(" ") && raw.includes("/")) {
+      const p = raw.split(/\s+/), f = p[1].split("/");
+      amount = parseInt(p[0]) + parseInt(f[0]) / parseInt(f[1]);
+    } else if (raw.includes("/")) {
+      const f = raw.split("/"); amount = parseInt(f[0]) / parseInt(f[1]);
+    } else { amount = parseFloat(raw); }
+    rest = rest.slice(nm[0].length);
+  }
+  let unit = "";
+  const words = rest.split(/\s+/);
+  if (words.length > 1) {
+    const fw = words[0].toLowerCase().replace(/[.,]$/, "");
+    if (UNIT_SET.has(fw)) { unit = fw; rest = words.slice(1).join(" "); }
+    else if (UNIT_ALIASES[fw]) { unit = UNIT_ALIASES[fw]; rest = words.slice(1).join(" "); }
+  }
+  let name = rest.replace(/\s*\(.*?\)\s*/g, " ").trim();
+  if (name) name = name.charAt(0).toUpperCase() + name.slice(1);
+  if (!name) return null;
+  return { name, amount: amount || 0, unit };
+}
+
+function loadRecipes() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+function saveRecipes(recipes) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(recipes)); }
+  catch (e) { console.error("Storage save failed:", e); }
+}
+
+const formatAmount = (amt) => {
+  if (amt === Math.floor(amt)) return String(amt);
+  const frac = amt - Math.floor(amt), whole = Math.floor(amt);
+  const fracs = [[0.25,"\u00BC"],[0.33,"\u2153"],[0.5,"\u00BD"],[0.67,"\u2154"],[0.75,"\u00BE"]];
+  for (const [v, s] of fracs) { if (Math.abs(frac - v) < 0.05) return whole > 0 ? whole + s : s; }
+  return amt.toFixed(1);
+};
+
+const getDomainFromUrl = (url) => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; } };
+
+// SVG Icons as functions returning createElement calls
+const icon = (children, w, h2, sw) => createElement("svg", { width: w||16, height: h2||16, viewBox: "0 0 "+(w||16)+" "+(h2||16), fill: "none", stroke: "currentColor", strokeWidth: sw||1.5, strokeLinecap: "round" }, ...children);
+
+// We'll use a simpler approach: inline SVG strings via dangerouslySetInnerHTML
+function SvgIcon({ html, size }) {
+  return h("span", { dangerouslySetInnerHTML: { __html: html }, style: { display: "inline-flex", alignItems: "center", width: size || 16, height: size || 16 } });
+}
+
+const ICONS = {
+  plus: '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="9" y1="3" x2="9" y2="15"/><line x1="3" y1="9" x2="15" y2="9"/></svg>',
+  trash: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 4h12M5.3 4V2.7a1 1 0 011-1h3.4a1 1 0 011 1V4M12.3 4v9a1.3 1.3 0 01-1.3 1.3H5a1.3 1.3 0 01-1.3-1.3V4"/></svg>',
+  check: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="2.5 7.5 5.5 10.5 11.5 3.5"/></svg>',
+  chevronR: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 4 10 8 6 12"/></svg>',
+  chevronD: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="transform:rotate(90deg)"><polyline points="6 4 10 8 6 12"/></svg>',
+  edit: '<svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8.5 2.5l4 4-9 9H.5v-3z"/><path d="M7 4l4 4"/></svg>',
+  copy: '<svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M1 10V1.5A.5.5 0 011.5 1H10"/></svg>',
+  link: '<svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5.5 7.5a2.5 2.5 0 003.5 0l2-2a2.5 2.5 0 00-3.5-3.5L6.5 3"/><path d="M7.5 5.5a2.5 2.5 0 00-3.5 0l-2 2a2.5 2.5 0 003.5 3.5L6.5 10"/></svg>',
+  search: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="5"/><line x1="11" y1="11" x2="14" y2="14"/></svg>',
+};
+
+const Icon = ({ name, size }) => h("span", { dangerouslySetInnerHTML: { __html: ICONS[name] || "" }, style: { display: "inline-flex", alignItems: "center" } });
+
+// Styles
+const S = {
+  container: { maxWidth: 560, margin: "0 auto", padding: "32px 16px 60px", fontFamily: "'EB Garamond', Georgia, 'Times New Roman', serif", minHeight: "100vh", background: "#f5f3ed" },
+  header: { textAlign: "center", marginBottom: 28 },
+  title: { fontSize: 36, fontWeight: 500, color: "#2c2c26", margin: 0, letterSpacing: "-0.5px" },
+  subtitle: { fontSize: 15, color: "#8a8a7a", margin: "6px 0 0", fontStyle: "italic" },
+  tabs: { display: "flex", gap: 4, marginBottom: 20, background: "#eae7df", borderRadius: 12, padding: 4 },
+  tab: { flex: 1, padding: "10px 8px", border: "none", background: "transparent", borderRadius: 10, cursor: "pointer", fontSize: 15, fontFamily: "'EB Garamond', Georgia, serif", color: "#6e6e62", fontWeight: 500, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, transition: "all 0.15s ease" },
+  tabActive: { background: "#fff", color: "#2c2c26", boxShadow: "0 1px 3px rgba(0,0,0,0.08)", fontWeight: 600 },
+  badge: { fontSize: 11, background: "#ddd8cc", color: "#6e6e62", borderRadius: 20, padding: "1px 7px", fontWeight: 600 },
+  badgeActive: { background: "#4a6741", color: "#fff" },
+  card: { background: "#fff", borderRadius: 16, padding: 24, boxShadow: "0 1px 4px rgba(0,0,0,0.06)", border: "1px solid #e5e2d8" },
+  cardTitle: { fontSize: 22, fontWeight: 500, color: "#2c2c26", margin: "0 0 20px" },
+  hint: { fontSize: 13, color: "#8a8a7a", margin: 0, fontStyle: "italic" },
+  recipeRow: { display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", border: "none", width: "100%", fontFamily: "'EB Garamond', Georgia, serif", fontSize: 14, transition: "background 0.1s ease" },
+  checkbox: { width: 22, height: 22, borderRadius: 6, border: "2px solid #c8c4b8", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "all 0.15s ease", color: "#fff" },
+  listItem: { display: "flex", alignItems: "center", gap: 12, padding: "10px 8px", cursor: "pointer", border: "none", background: "transparent", width: "100%", fontFamily: "'EB Garamond', Georgia, serif", fontSize: 15, textAlign: "left", borderRadius: 8, transition: "all 0.15s ease" },
+  label: { display: "block", fontSize: 13, fontWeight: 600, color: "#5e5e52", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.5px" },
+  input: { display: "block", width: "100%", padding: "10px 12px", border: "1.5px solid #ddd8cc", borderRadius: 8, fontSize: 15, fontFamily: "'EB Garamond', Georgia, serif", color: "#2c2c26", background: "#fafaf6", outline: "none", boxSizing: "border-box", transition: "border-color 0.15s ease" },
+  primaryBtn: { padding: "9px 18px", background: "#4a6741", color: "#fff", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontFamily: "'EB Garamond', Georgia, serif", fontWeight: 600, display: "flex", alignItems: "center", gap: 6, transition: "background 0.15s ease", whiteSpace: "nowrap" },
+  secondaryBtn: { padding: "9px 18px", background: "transparent", color: "#5e5e52", border: "1.5px solid #ddd8cc", borderRadius: 8, cursor: "pointer", fontSize: 14, fontFamily: "'EB Garamond', Georgia, serif", fontWeight: 500 },
+  ghostBtn: { padding: "6px 12px", background: "transparent", color: "#4a6741", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 14, fontFamily: "'EB Garamond', Georgia, serif", fontWeight: 600, display: "flex", alignItems: "center", gap: 6 },
+  iconBtn: { padding: 6, background: "transparent", border: "none", borderRadius: 6, cursor: "pointer", color: "#8a8a7a", display: "flex", alignItems: "center", transition: "color 0.15s ease" },
+  emptyState: { textAlign: "center", padding: "40px 20px", color: "#8a8a7a", fontSize: 15, fontStyle: "italic", display: "flex", flexDirection: "column", alignItems: "center", gap: 16 },
+  modeTab: { padding: "5px 12px", border: "none", background: "transparent", borderRadius: 6, cursor: "pointer", fontSize: 12, fontFamily: "'EB Garamond', Georgia, serif", color: "#6e6e62", fontWeight: 500, transition: "all 0.15s ease" },
+  modeTabActive: { background: "#fff", color: "#2c2c26", boxShadow: "0 1px 2px rgba(0,0,0,0.06)", fontWeight: 600 },
+};
+
+function RecipeForm({ initial, onSave, onCancel, formatAmount }) {
+  const [name, setName] = useState(initial?.name || "");
+  const [url, setUrl] = useState(initial?.url || "");
+  const [servings, setServings] = useState(initial?.servings || 4);
+  const [ingredients, setIngredients] = useState(
+    initial?.ingredients?.length > 0
+      ? initial.ingredients.map((ig, idx) => ({ ...ig, _key: idx }))
+      : [{ name: "", amount: "", unit: "", _key: 0 }]
+  );
+  const [keyCounter, setKeyCounter] = useState(initial?.ingredients?.length || 1);
+  const [inputMode, setInputMode] = useState("manual");
+  const [bulkText, setBulkText] = useState("");
+  const [parsePreview, setParsePreview] = useState(null);
+
+  const addIngredient = () => { setIngredients(p => [...p, { name: "", amount: "", unit: "", _key: keyCounter }]); setKeyCounter(k => k + 1); };
+  const removeIngredient = (key) => setIngredients(p => p.filter(i => i._key !== key));
+  const updateIngredient = (key, field, val) => setIngredients(p => p.map(i => i._key === key ? { ...i, [field]: val } : i));
+
+  const handleBulkParse = () => { setParsePreview(bulkText.split("\n").filter(l => l.trim()).map(parseIngredientLine).filter(Boolean)); };
+  const handleBulkConfirm = () => {
+    if (!parsePreview || !parsePreview.length) return;
+    const ni = parsePreview.map((ig, i) => ({ ...ig, _key: keyCounter + i }));
+    const has = ingredients.some(i => i.name.trim());
+    if (has) setIngredients(p => [...p, ...ni]); else setIngredients(ni);
+    setKeyCounter(k => k + parsePreview.length);
+    setBulkText(""); setParsePreview(null); setInputMode("manual");
+  };
+  const handleSave = () => {
+    if (!name.trim()) return;
+    const clean = ingredients.filter(i => i.name.trim()).map(({ _key, ...rest }) => ({ ...rest, amount: parseFloat(rest.amount) || 0 }));
+    if (!clean.length) return;
+    onSave({ name: name.trim(), url: url.trim(), servings, ingredients: clean });
+  };
+
+  return h("div", { style: { display: "flex", flexDirection: "column", gap: 20 } },
+    h("div", null,
+      h("label", { style: S.label }, "Recipe Name"),
+      h("input", { style: S.input, value: name, onChange: e => setName(e.target.value), placeholder: "e.g. Chicken Tikka Masala", autoFocus: true })
+    ),
+    h("div", null,
+      h("label", { style: S.label }, "Recipe Link"),
+      h("input", { style: S.input, value: url, onChange: e => setUrl(e.target.value), placeholder: "https://www.seriouseats.com/...", type: "url" }),
+      h("p", { style: { fontSize: 12, color: "#a0a090", margin: "4px 0 0", fontStyle: "italic" } }, "Optional \u2014 save a link back to the original recipe")
+    ),
+    h("div", null,
+      h("label", { style: S.label }, "Servings"),
+      h("input", { style: { ...S.input, width: 80 }, type: "number", min: 1, value: servings, onChange: e => setServings(parseInt(e.target.value) || 1) })
+    ),
+    h("div", null,
+      h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 } },
+        h("label", { style: { ...S.label, margin: 0 } }, "Ingredients"),
+        h("div", { style: { display: "flex", gap: 2, background: "#eae7df", borderRadius: 8, padding: 2 } },
+          h("button", { style: { ...S.modeTab, ...(inputMode === "manual" ? S.modeTabActive : {}) }, onClick: () => setInputMode("manual") }, "One by one"),
+          h("button", { style: { ...S.modeTab, ...(inputMode === "bulk" ? S.modeTabActive : {}) }, onClick: () => { setInputMode("bulk"); setParsePreview(null); } }, "Paste list")
+        )
+      ),
+      inputMode === "bulk"
+        ? h("div", { style: { display: "flex", flexDirection: "column", gap: 10 } },
+            !parsePreview
+              ? h(React.Fragment, null,
+                  h("textarea", { style: { ...S.input, minHeight: 160, resize: "vertical", lineHeight: 1.7 }, value: bulkText, onChange: e => setBulkText(e.target.value), placeholder: "Paste your ingredient list here, one per line:\n\n2 cups all-purpose flour\n1/2 tsp salt\n3 large eggs\n1 cup whole milk\n2 tbsp butter" }),
+                  h("button", { style: { ...S.primaryBtn, opacity: bulkText.trim() ? 1 : 0.5, alignSelf: "flex-start" }, onClick: handleBulkParse, disabled: !bulkText.trim() }, "Parse Ingredients")
+                )
+              : h(React.Fragment, null,
+                  h("p", { style: { fontSize: 13, color: "#5e5e52", margin: 0 } }, "Parsed ", h("strong", null, parsePreview.length), " ingredient" + (parsePreview.length !== 1 ? "s" : "") + ". Review below, then confirm:"),
+                  h("div", { style: { background: "#fafaf6", border: "1.5px solid #e5e2d8", borderRadius: 10, padding: "10px 14px", fontSize: 14, color: "#3a3a32" } },
+                    parsePreview.map((ig, i) => h("div", { key: i, style: { padding: "4px 0", display: "flex", gap: 8 } },
+                      h("span", { style: { color: "#4a6741", fontWeight: 600, minWidth: 55, textAlign: "right" } }, ig.amount > 0 ? formatAmount(ig.amount) : "\u2014", ig.unit ? " " + ig.unit : ""),
+                      h("span", null, ig.name)
+                    ))
+                  ),
+                  h("div", { style: { display: "flex", gap: 8 } },
+                    h("button", { style: S.primaryBtn, onClick: handleBulkConfirm }, h(Icon, { name: "check" }), ingredients.some(i => i.name.trim()) ? " Add to List" : " Use These"),
+                    h("button", { style: S.secondaryBtn, onClick: () => setParsePreview(null) }, "Re-edit")
+                  )
+                )
+          )
+        : h(React.Fragment, null,
+            h("div", { style: { display: "flex", flexDirection: "column", gap: 8 } },
+              ingredients.map(ig => h("div", { key: ig._key, style: { display: "flex", gap: 8, alignItems: "center" } },
+                h("input", { style: { ...S.input, flex: 2, margin: 0 }, value: ig.name, onChange: e => updateIngredient(ig._key, "name", e.target.value), placeholder: "Ingredient" }),
+                h("input", { style: { ...S.input, width: 65, margin: 0, textAlign: "center" }, value: ig.amount, onChange: e => updateIngredient(ig._key, "amount", e.target.value), placeholder: "Qty", type: "number", step: "any" }),
+                h("select", { style: { ...S.input, width: 75, margin: 0, cursor: "pointer" }, value: ig.unit, onChange: e => updateIngredient(ig._key, "unit", e.target.value) },
+                  UNITS.map(u => h("option", { key: u, value: u }, u || "\u2014"))
+                ),
+                ingredients.length > 1 && h("button", { style: S.iconBtn, onClick: () => removeIngredient(ig._key) }, h(Icon, { name: "trash" }))
+              ))
+            ),
+            h("button", { style: { ...S.ghostBtn, marginTop: 10 }, onClick: addIngredient }, h(Icon, { name: "plus" }), " Add Ingredient")
+          )
+    ),
+    h("div", { style: { display: "flex", gap: 10, marginTop: 8 } },
+      h("button", { style: S.primaryBtn, onClick: handleSave }, initial ? "Save Changes" : "Add Recipe"),
+      h("button", { style: S.secondaryBtn, onClick: onCancel }, "Cancel")
+    )
+  );
+}
+
+function RecipeLinkBadge({ url }) {
+  if (!url) return null;
+  return h("a", { href: url, target: "_blank", rel: "noopener noreferrer", onClick: e => e.stopPropagation(),
+    style: { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, color: "#6a8a60", textDecoration: "none", background: "#f0f4ee", padding: "2px 8px", borderRadius: 5, marginTop: 3, border: "1px solid #dde8d8" }
+  }, h(Icon, { name: "link" }), " ", getDomainFromUrl(url));
+}
+
+function App() {
+  const [recipes, setRecipes] = useState([]);
+  const [selected, setSelected] = useState(new Set());
+  const [view, setView] = useState("recipes");
+  const [loading, setLoading] = useState(true);
+  const [editingRecipe, setEditingRecipe] = useState(null);
+  const [checkedItems, setCheckedItems] = useState(new Set());
+  const [copied, setCopied] = useState(false);
+  const [expandedRecipe, setExpandedRecipe] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [deletedRecipe, setDeletedRecipe] = useState(null);
+  const [undoTimeout, setUndoTimeout] = useState(null);
+
+  useEffect(() => { const stored = loadRecipes(); setRecipes(stored && stored.length > 0 ? stored : DEFAULT_RECIPES); setLoading(false); }, []);
+  useEffect(() => { if (!loading) saveRecipes(recipes); }, [recipes, loading]);
+
+  const toggleSelect = (id) => setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  const deleteRecipe = (recipe) => {
+    if (undoTimeout) clearTimeout(undoTimeout);
+    setRecipes(prev => prev.filter(r => r.id !== recipe.id));
+    setSelected(prev => { const n = new Set(prev); n.delete(recipe.id); return n; });
+    setDeletedRecipe(recipe);
+    setUndoTimeout(setTimeout(() => setDeletedRecipe(null), 5000));
+  };
+  const undoDelete = () => {
+    if (!deletedRecipe) return;
+    if (undoTimeout) clearTimeout(undoTimeout);
+    setRecipes(prev => [...prev, deletedRecipe]);
+    setDeletedRecipe(null); setUndoTimeout(null);
+  };
+
+  const buildGroceryList = useCallback(() => {
+    const map = new Map();
+    recipes.filter(r => selected.has(r.id)).forEach(recipe => {
+      recipe.ingredients.forEach(ig => {
+        const key = ig.name.toLowerCase().trim() + "||" + ig.unit.toLowerCase().trim();
+        if (map.has(key)) map.get(key).amount += ig.amount;
+        else map.set(key, { name: ig.name.trim(), amount: ig.amount, unit: ig.unit });
+      });
+    });
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [recipes, selected]);
+
+  const copyListToClipboard = () => {
+    const text = buildGroceryList().map(i => formatAmount(i.amount) + (i.unit ? " " + i.unit : "") + " " + i.name).join("\n");
+    navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }).catch(() => {
+      const ta = document.createElement("textarea"); ta.value = text; ta.style.cssText = "position:fixed;left:-9999px"; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch(e) {}
+      document.body.removeChild(ta);
+    });
+  };
+
+  const filteredRecipes = recipes.filter(r => r.name.toLowerCase().includes(searchQuery.toLowerCase()));
+
+  if (loading) return h("div", { style: S.container }, h("div", { style: { ...S.card, textAlign: "center", padding: 60 } }, h("p", { style: { color: "#8a8a7a", fontSize: 18 } }, "Loading recipes...")));
+
+  const groceryList = view === "list" ? buildGroceryList() : [];
+  const selectedRecipes = recipes.filter(r => selected.has(r.id));
+  const sc = selected.size;
+  const isRecipesView = view === "recipes" || view === "addRecipe" || view === "editRecipe";
+
+  return h("div", { style: S.container },
+    // Header
+    h("div", { style: S.header },
+      h("h1", { style: S.title }, "Grocery List"),
+      h("p", { style: S.subtitle }, "Select recipes, build your list")
+    ),
+    // Tabs
+    h("div", { style: S.tabs },
+      h("button", { style: { ...S.tab, ...(isRecipesView ? S.tabActive : {}) }, onClick: () => setView("recipes") },
+        "Recipes", h("span", { style: { ...S.badge, ...(isRecipesView ? S.badgeActive : {}) } }, recipes.length)
+      ),
+      h("button", { style: { ...S.tab, ...(view === "list" ? S.tabActive : {}) }, onClick: () => setView("list") },
+        "Shopping List", sc > 0 && h("span", { style: { ...S.badge, ...(view === "list" ? S.badgeActive : {}) } }, sc)
+      )
+    ),
+
+    // RECIPES VIEW
+    view === "recipes" && h("div", { style: S.card },
+      h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 } },
+        h("p", { style: S.hint }, sc > 0 ? sc + " selected" : "Tap to select for this week"),
+        h("button", { style: S.primaryBtn, onClick: () => { setEditingRecipe(null); setView("addRecipe"); } }, h(Icon, { name: "plus" }), " Add Recipe")
+      ),
+      // Search
+      h("div", { style: { position: "relative", marginBottom: 14 } },
+        h("div", { style: { position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "#a0a090", pointerEvents: "none" } }, h(Icon, { name: "search" })),
+        h("input", { style: { ...S.input, paddingLeft: 36 }, value: searchQuery, onChange: e => setSearchQuery(e.target.value), placeholder: "Search recipes..." }),
+        searchQuery && h("button", { style: { position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "#a0a090", fontSize: 18, fontFamily: "sans-serif", lineHeight: 1, padding: 4 }, onClick: () => setSearchQuery("") }, "\u00D7")
+      ),
+      // Selected bar
+      sc > 0 && h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#f0f4ee", border: "1px solid #dde8d8", borderRadius: 10, padding: "10px 14px", marginBottom: 14 } },
+        h("span", { style: { fontSize: 14, color: "#4a6741", fontWeight: 600 } }, sc + " recipe" + (sc !== 1 ? "s" : "") + " selected"),
+        h("button", { style: { ...S.primaryBtn, padding: "6px 14px", fontSize: 13 }, onClick: () => setView("list") }, "View Shopping List \u2192")
+      ),
+      // Recipe list
+      filteredRecipes.length === 0
+        ? h("div", { style: S.emptyState }, h("p", null, searchQuery ? "No recipes match your search" : "No recipes yet"))
+        : h("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+            filteredRecipes.map(recipe => {
+              const isSel = selected.has(recipe.id);
+              return h("div", { key: recipe.id, style: { borderRadius: 10, overflow: "hidden", border: "1.5px solid " + (isSel ? "#4a6741" : "#e5e2d8"), transition: "all 0.15s ease" } },
+                h("div", { style: { ...S.recipeRow, background: isSel ? "#f0f4ee" : "#fff" } },
+                  h("div", { style: { ...S.checkbox, background: isSel ? "#4a6741" : "transparent", borderColor: isSel ? "#4a6741" : "#c8c4b8", cursor: "pointer" }, onClick: () => toggleSelect(recipe.id) },
+                    isSel && h(Icon, { name: "check" })
+                  ),
+                  h("div", { style: { flex: 1, cursor: "pointer" }, onClick: () => toggleSelect(recipe.id) },
+                    h("div", null,
+                      h("span", { style: { fontWeight: 600, color: "#2c2c26", fontSize: 15 } }, recipe.name),
+                      h("span", { style: { color: "#8a8a7a", fontSize: 13, marginLeft: 10 } }, recipe.ingredients.length + " item" + (recipe.ingredients.length !== 1 ? "s" : "") + " \u00B7 " + recipe.servings + " servings")
+                    ),
+                    recipe.url && h("div", null, h(RecipeLinkBadge, { url: recipe.url }))
+                  ),
+                  h("div", { style: { display: "flex", gap: 4, alignItems: "center" } },
+                    h("button", { style: S.iconBtn, title: "Edit", onClick: () => { setEditingRecipe(recipe); setView("editRecipe"); } }, h(Icon, { name: "edit" })),
+                    h("button", { style: { ...S.iconBtn, color: "#b54a4a" }, title: "Delete", onClick: e => { e.stopPropagation(); e.preventDefault(); deleteRecipe(recipe); } }, h(Icon, { name: "trash" })),
+                    h("div", { style: { padding: "4px 8px", cursor: "pointer", color: "#8a8a7a", transition: "transform 0.2s ease", transform: expandedRecipe === recipe.id ? "rotate(90deg)" : "rotate(0deg)" }, onClick: () => setExpandedRecipe(expandedRecipe === recipe.id ? null : recipe.id) }, h(Icon, { name: "chevronR" }))
+                  )
+                ),
+                expandedRecipe === recipe.id && h("div", { style: { padding: "0 16px 14px 52px", background: isSel ? "#f0f4ee" : "#fafaf6", fontSize: 13, color: "#5e5e52" } },
+                  recipe.ingredients.map((ig, i) => h("div", { key: i, style: { padding: "3px 0" } }, formatAmount(ig.amount), ig.unit ? " " + ig.unit : "", " ", ig.name))
+                )
+              );
+            })
+          )
+    ),
+
+    // ADD / EDIT RECIPE
+    (view === "addRecipe" || view === "editRecipe") && h("div", { style: S.card },
+      h("h2", { style: S.cardTitle }, view === "editRecipe" ? "Edit Recipe" : "New Recipe"),
+      h(RecipeForm, {
+        initial: view === "editRecipe" ? editingRecipe : null,
+        formatAmount,
+        onSave: (data) => {
+          if (view === "editRecipe" && editingRecipe) setRecipes(prev => prev.map(r => r.id === editingRecipe.id ? { ...r, ...data } : r));
+          else setRecipes(prev => [...prev, { ...data, id: "recipe-" + Date.now() }]);
+          setView("recipes");
+        },
+        onCancel: () => setView("recipes")
+      })
+    ),
+
+    // SHOPPING LIST
+    view === "list" && h("div", { style: S.card },
+      sc === 0
+        ? h("div", { style: S.emptyState },
+            h("p", null, "No recipes selected yet."),
+            h("button", { style: S.primaryBtn, onClick: () => setView("recipes") }, "\u2190 Pick Recipes")
+          )
+        : h(React.Fragment, null,
+            h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 } },
+              h("p", { style: S.hint }, "For: " + selectedRecipes.map(r => r.name).join(", ")),
+              h("button", { style: { ...S.ghostBtn, fontSize: 13, gap: 5 }, onClick: copyListToClipboard }, h(Icon, { name: "copy" }), copied ? " Copied!" : " Copy")
+            ),
+            selectedRecipes.some(r => r.url) && h("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8, marginBottom: 4 } },
+              selectedRecipes.filter(r => r.url).map(r => h("a", { key: r.id, href: r.url, target: "_blank", rel: "noopener noreferrer",
+                style: { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, color: "#6a8a60", textDecoration: "none", background: "#f0f4ee", padding: "3px 9px", borderRadius: 5, border: "1px solid #dde8d8" }
+              }, h(Icon, { name: "link" }), " ", r.name))
+            ),
+            h("div", { style: { display: "flex", flexDirection: "column", gap: 2, marginTop: 10 } },
+              groceryList.map((item, i) => {
+                const key = item.name + "||" + item.unit;
+                const isChk = checkedItems.has(key);
+                return h("button", { key: i, style: { ...S.listItem, opacity: isChk ? 0.45 : 1, textDecoration: isChk ? "line-through" : "none" },
+                  onClick: () => setCheckedItems(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; })
+                },
+                  h("div", { style: { ...S.checkbox, width: 20, height: 20, background: isChk ? "#4a6741" : "transparent", borderColor: isChk ? "#4a6741" : "#c8c4b8" } }, isChk && h(Icon, { name: "check" })),
+                  h("span", { style: { fontWeight: 500, color: "#3a3a32", minWidth: 60 } }, formatAmount(item.amount), item.unit ? " " + item.unit : ""),
+                  h("span", { style: { color: "#5e5e52" } }, item.name)
+                );
+              })
+            ),
+            h("div", { style: { marginTop: 20, paddingTop: 16, borderTop: "1px solid #e5e2d8", display: "flex", justifyContent: "space-between", alignItems: "center" } },
+              h("span", { style: { fontSize: 13, color: "#8a8a7a" } }, checkedItems.size + " of " + groceryList.length + " items checked"),
+              checkedItems.size > 0 && h("button", { style: { ...S.ghostBtn, fontSize: 13 }, onClick: () => setCheckedItems(new Set()) }, "Reset")
+            )
+          )
+    ),
+
+    // Undo toast
+    deletedRecipe && h("div", { style: { position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", background: "#2c2c26", color: "#fff", borderRadius: 10, padding: "12px 20px", display: "flex", alignItems: "center", gap: 14, fontSize: 14, fontFamily: "'EB Garamond', Georgia, serif", boxShadow: "0 4px 20px rgba(0,0,0,0.25)", zIndex: 999, maxWidth: 400 } },
+      h("span", { style: { opacity: 0.9 } }, 'Deleted "' + deletedRecipe.name + '"'),
+      h("button", { onClick: undoDelete, style: { background: "transparent", border: "1px solid rgba(255,255,255,0.3)", color: "#fff", borderRadius: 6, padding: "4px 12px", cursor: "pointer", fontFamily: "'EB Garamond', Georgia, serif", fontSize: 13, fontWeight: 600, whiteSpace: "nowrap" } }, "Undo")
+    )
+  );
+}
+
+ReactDOM.render(h(App), document.getElementById("root"));
+  </script>
+</body>
+</html>
