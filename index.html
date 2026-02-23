@@ -20,8 +20,6 @@
 "use strict";
 const { useState, useEffect, useCallback, createElement: h } = React;
 
-const STORAGE_KEY = "grocery-recipes-v3";
-
 const DEFAULT_RECIPES = [
   {
     id: "demo-1", name: "Spaghetti Carbonara",
@@ -96,16 +94,31 @@ function parseIngredientLine(line) {
   return { name, amount: amount || 0, unit };
 }
 
-function loadRecipes() {
+const FIREBASE_URL = "https://recipe-list-app-8ea6e-default-rtdb.firebaseio.com";
+
+async function loadRecipes() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch { return null; }
+    const res = await fetch(FIREBASE_URL + "/recipes.json");
+    const data = await res.json();
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      return Object.values(data);
+    }
+    if (Array.isArray(data) && data.length > 0) return data;
+    return null;
+  } catch (e) { console.error("Firebase load failed:", e); return null; }
 }
 
-function saveRecipes(recipes) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(recipes)); }
-  catch (e) { console.error("Storage save failed:", e); }
+async function saveRecipes(recipes) {
+  try {
+    // Store as an object keyed by recipe id for cleaner Firebase structure
+    const obj = {};
+    recipes.forEach(r => { obj[r.id] = r; });
+    await fetch(FIREBASE_URL + "/recipes.json", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(obj)
+    });
+  } catch (e) { console.error("Firebase save failed:", e); }
 }
 
 const formatAmount = (amt) => {
@@ -287,14 +300,21 @@ function App() {
   const [undoTimeout, setUndoTimeout] = useState(null);
 
   useEffect(() => {
-    const stored = loadRecipes();
-    if (stored && stored.length > 0) { setRecipes(stored); }
-    else { setRecipes(DEFAULT_RECIPES); saveRecipes(DEFAULT_RECIPES); }
-    // Use a timeout to ensure loading flag is set after initial render cycle
-    setTimeout(() => setLoading(false), 0);
+    (async () => {
+      const stored = await loadRecipes();
+      if (stored && stored.length > 0) { setRecipes(stored); }
+      else { setRecipes(DEFAULT_RECIPES); await saveRecipes(DEFAULT_RECIPES); }
+      setLoading(false);
+    })();
   }, []);
+
+  // Debounced save to Firebase to avoid excessive writes
+  const saveTimeoutRef = React.useRef(null);
   useEffect(() => {
-    if (!loading && recipes.length > 0) saveRecipes(recipes);
+    if (!loading && recipes.length > 0) {
+      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = setTimeout(() => saveRecipes(recipes), 500);
+    }
   }, [recipes, loading]);
 
   const toggleSelect = (id) => setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
